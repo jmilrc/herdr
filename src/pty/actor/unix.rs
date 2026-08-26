@@ -11,6 +11,7 @@ use tokio::sync::mpsc::{self, error::TryRecvError as DataTryRecvError};
 use tracing::{debug, warn};
 
 use crate::pty::fd;
+use crate::pty::input::{InputKind, InputProvenance, PtyInput};
 
 // Actor handle methods must call wake_actor() after queuing work. The idle
 // timeout is only a fallback for missed wakes; PTY and wake readiness drive
@@ -72,7 +73,10 @@ pub(crate) struct PtyIoActorConfig {
 }
 
 enum PtyIoDataCommand {
-    WriteUserInput(Bytes),
+    WriteUserInput {
+        input: PtyInput,
+        completion: Option<std_mpsc::Sender<std::io::Result<()>>>,
+    },
 }
 
 enum PtyIoControlCommand {
@@ -102,7 +106,7 @@ struct UserWriteGate {
 impl PtyIoActorHandle {
     pub(crate) async fn write_user_input(
         &self,
-        bytes: Bytes,
+        input: PtyInput,
     ) -> Result<(), mpsc::error::SendError<Bytes>> {
         {
             let user_writes = self
@@ -110,13 +114,13 @@ impl PtyIoActorHandle {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if !user_writes.accepting {
-                return Err(mpsc::error::SendError(bytes));
+                return Err(mpsc::error::SendError(input.bytes));
             }
         }
 
         let permit = match self.data_tx.reserve().await {
             Ok(permit) => permit,
-            Err(_) => return Err(mpsc::error::SendError(bytes)),
+            Err(_) => return Err(mpsc::error::SendError(input.bytes)),
         };
 
         let user_writes = self
@@ -124,39 +128,80 @@ impl PtyIoActorHandle {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !user_writes.accepting {
-            return Err(mpsc::error::SendError(bytes));
+            return Err(mpsc::error::SendError(input.bytes));
         }
-        permit.send(PtyIoDataCommand::WriteUserInput(bytes));
+        permit.send(PtyIoDataCommand::WriteUserInput {
+            input,
+            completion: None,
+        });
         self.wake_actor();
         Ok(())
     }
 
     pub(crate) fn try_write_user_input(
         &self,
-        bytes: Bytes,
+        input: PtyInput,
     ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         let user_writes = self
             .user_writes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !user_writes.accepting {
-            return Err(mpsc::error::TrySendError::Closed(bytes));
+            return Err(mpsc::error::TrySendError::Closed(input.bytes));
         }
-        match self
-            .data_tx
-            .try_send(PtyIoDataCommand::WriteUserInput(bytes))
-        {
+        match self.data_tx.try_send(PtyIoDataCommand::WriteUserInput {
+            input,
+            completion: None,
+        }) {
             Ok(()) => {
                 self.wake_actor();
                 Ok(())
             }
-            Err(mpsc::error::TrySendError::Full(PtyIoDataCommand::WriteUserInput(bytes))) => {
-                Err(mpsc::error::TrySendError::Full(bytes))
-            }
-            Err(mpsc::error::TrySendError::Closed(PtyIoDataCommand::WriteUserInput(bytes))) => {
-                Err(mpsc::error::TrySendError::Closed(bytes))
-            }
+            Err(mpsc::error::TrySendError::Full(PtyIoDataCommand::WriteUserInput {
+                input,
+                ..
+            })) => Err(mpsc::error::TrySendError::Full(input.bytes)),
+            Err(mpsc::error::TrySendError::Closed(PtyIoDataCommand::WriteUserInput {
+                input,
+                ..
+            })) => Err(mpsc::error::TrySendError::Closed(input.bytes)),
         }
+    }
+
+    pub(crate) fn write_user_input_transaction(&self, input: PtyInput) -> std::io::Result<()> {
+        let user_writes = self
+            .user_writes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !user_writes.accepting {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "PTY actor is not accepting input",
+            ));
+        }
+        let (completion_tx, completion_rx) = std_mpsc::channel();
+        self.data_tx
+            .try_send(PtyIoDataCommand::WriteUserInput {
+                input,
+                completion: Some(completion_tx),
+            })
+            .map_err(|err| match err {
+                mpsc::error::TrySendError::Full(_) => std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "PTY actor input queue full",
+                ),
+                mpsc::error::TrySendError::Closed(_) => {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "PTY actor closed")
+                }
+            })?;
+        self.wake_actor();
+        drop(user_writes);
+        completion_rx.recv().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "PTY actor closed before input transaction completed",
+            )
+        })?
     }
 
     pub(crate) fn write_terminal_response(&self, response: impl FnOnce() -> Option<Bytes>) {
@@ -421,7 +466,7 @@ struct PtyIoActorRunner {
     data_rx: mpsc::Receiver<PtyIoDataCommand>,
     control_rx: std_mpsc::Receiver<PtyIoControlCommand>,
     state: ActorState,
-    pending_writes: VecDeque<Bytes>,
+    pending_writes: VecDeque<PendingWrite>,
     current_write_offset: usize,
     wake_read_fd: OwnedFd,
     controls: Arc<Mutex<SharedPtyControls>>,
@@ -431,10 +476,24 @@ struct PtyIoActorRunner {
     poll_observer: Option<std_mpsc::Sender<()>>,
 }
 
+struct PendingWrite {
+    input: PtyInput,
+    completion: Option<std_mpsc::Sender<std::io::Result<()>>>,
+}
+
 impl PtyIoActorRunner {
-    fn enqueue_write(&mut self, bytes: Bytes) {
-        if !bytes.is_empty() {
-            self.pending_writes.push_back(bytes);
+    fn enqueue_write(
+        &mut self,
+        input: PtyInput,
+        completion: Option<std_mpsc::Sender<std::io::Result<()>>>,
+    ) {
+        if input.bytes.is_empty() {
+            if let Some(completion) = completion {
+                let _ = completion.send(Ok(()));
+            }
+        } else {
+            self.pending_writes
+                .push_back(PendingWrite { input, completion });
         }
     }
 
@@ -543,9 +602,14 @@ impl PtyIoActorRunner {
 
     fn handle_data_command(&mut self, command: PtyIoDataCommand) -> bool {
         match command {
-            PtyIoDataCommand::WriteUserInput(bytes) => {
+            PtyIoDataCommand::WriteUserInput { input, completion } => {
                 if self.state == ActorState::Running {
-                    self.enqueue_write(bytes);
+                    self.enqueue_write(input, completion);
+                } else if let Some(completion) = completion {
+                    let _ = completion.send(Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "PTY actor is quiesced",
+                    )));
                 }
             }
         }
@@ -641,9 +705,16 @@ impl PtyIoActorRunner {
     }
 
     fn drain_pre_quiesce_commands(&mut self) {
-        while let Ok(PtyIoDataCommand::WriteUserInput(bytes)) = self.data_rx.try_recv() {
+        while let Ok(PtyIoDataCommand::WriteUserInput { input, completion }) =
+            self.data_rx.try_recv()
+        {
             if self.state != ActorState::Released {
-                self.enqueue_write(bytes);
+                self.enqueue_write(input, completion);
+            } else if let Some(completion) = completion {
+                let _ = completion.send(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "PTY actor released",
+                )));
             }
         }
     }
@@ -713,13 +784,16 @@ impl PtyIoActorRunner {
             return;
         }
         for bytes in terminal_responses {
-            self.enqueue_write(bytes);
+            self.enqueue_write(
+                PtyInput::new(bytes, InputProvenance::System, InputKind::Control),
+                None,
+            );
         }
     }
 
     fn flush_pending_writes_once(&mut self) {
-        while let Some(bytes) = self.pending_writes.front() {
-            let chunk = &bytes[self.current_write_offset..];
+        while let Some(write) = self.pending_writes.front() {
+            let chunk = &write.input.bytes[self.current_write_offset..];
             match self.file.write(chunk) {
                 Ok(0) => {
                     warn!(pane = self.pane_id, "PTY actor write returned zero bytes");
@@ -727,8 +801,14 @@ impl PtyIoActorRunner {
                 }
                 Ok(written) => {
                     self.current_write_offset += written;
-                    if self.current_write_offset >= bytes.len() {
-                        self.pending_writes.pop_front();
+                    if self.current_write_offset >= write.input.bytes.len() {
+                        if let Some(completion) = self
+                            .pending_writes
+                            .pop_front()
+                            .and_then(|write| write.completion)
+                        {
+                            let _ = completion.send(Ok(()));
+                        }
                         self.current_write_offset = 0;
                     }
                 }
@@ -736,13 +816,22 @@ impl PtyIoActorRunner {
                 Err(err) if err.kind() == std::io::ErrorKind::Interrupted => return,
                 Err(err) => {
                     warn!(pane = self.pane_id, err = %err, "PTY actor write failed");
-                    self.pending_writes.clear();
+                    self.fail_pending_writes(err);
                     self.current_write_offset = 0;
                     return;
                 }
             }
         }
         let _ = self.file.flush();
+    }
+
+    fn fail_pending_writes(&mut self, error: std::io::Error) {
+        let message = error.to_string();
+        for write in self.pending_writes.drain(..) {
+            if let Some(completion) = write.completion {
+                let _ = completion.send(Err(std::io::Error::new(error.kind(), message.clone())));
+            }
+        }
     }
 
     fn resize(&self, resize: PtyResize) {
@@ -817,6 +906,17 @@ mod tests {
         os::unix::net::UnixStream,
         sync::atomic::{AtomicBool, Ordering},
     };
+
+    fn manual_input(bytes: Bytes) -> PtyInput {
+        PtyInput::new(bytes, InputProvenance::Manual, InputKind::Content)
+    }
+
+    fn user_write(bytes: Bytes) -> PtyIoDataCommand {
+        PtyIoDataCommand::WriteUserInput {
+            input: manual_input(bytes),
+            completion: None,
+        }
+    }
 
     fn test_wake_pair() -> (fd::WakeWriter, OwnedFd) {
         let pipe = fd::create_wake_pipe().expect("wake pipe");
@@ -893,7 +993,7 @@ mod tests {
     fn actor_ignores_empty_user_input_write() {
         let (mut runner, _peer) = actor_runner_for_unit_test();
 
-        assert!(!runner.handle_data_command(PtyIoDataCommand::WriteUserInput(Bytes::new())));
+        assert!(!runner.handle_data_command(user_write(Bytes::new())));
 
         assert!(runner.pending_writes.is_empty());
     }
@@ -903,7 +1003,7 @@ mod tests {
         let (handle, mut peer, _read_rx) = actor_with_socket_pair(false);
 
         handle
-            .try_write_user_input(Bytes::from_static(b"hello"))
+            .try_write_user_input(manual_input(Bytes::from_static(b"hello")))
             .expect("write command accepted");
 
         let mut buf = [0u8; 5];
@@ -925,7 +1025,7 @@ mod tests {
 
         let start = Instant::now();
         handle
-            .try_write_user_input(Bytes::from_static(b"x"))
+            .try_write_user_input(manual_input(Bytes::from_static(b"x")))
             .expect("write command accepted");
 
         let mut buf = [0u8; 1];
@@ -977,7 +1077,7 @@ mod tests {
 
         let marker = Bytes::from_static(b"queued-input");
         handle
-            .try_write_user_input(marker.clone())
+            .try_write_user_input(manual_input(marker.clone()))
             .expect("write command accepted");
 
         const OUTPUT_LEN: usize = 128 * 1024;
@@ -1081,7 +1181,7 @@ mod tests {
             .begin_handoff(Duration::from_secs(1))
             .expect("handoff quiesced");
         assert!(handle
-            .try_write_user_input(Bytes::from_static(b"blocked"))
+            .try_write_user_input(manual_input(Bytes::from_static(b"blocked")))
             .is_err());
 
         peer.write_all(b"held").expect("peer write during quiesce");
@@ -1097,7 +1197,7 @@ mod tests {
         assert_eq!(read, Bytes::from_static(b"held"));
 
         handle
-            .try_write_user_input(Bytes::from_static(b"after"))
+            .try_write_user_input(manual_input(Bytes::from_static(b"after")))
             .expect("write accepted after rollback");
         let mut buf = [0u8; 5];
         peer.read_exact(&mut buf).expect("peer receives after");
@@ -1135,9 +1235,7 @@ mod tests {
         let (data_tx, _data_rx) = mpsc::channel(1);
         let (control_tx, _control_rx) = std_mpsc::channel();
         data_tx
-            .try_send(PtyIoDataCommand::WriteUserInput(Bytes::from_static(
-                b"fill",
-            )))
+            .try_send(user_write(Bytes::from_static(b"fill")))
             .expect("fill command queue");
         let controls = Arc::new(Mutex::new(SharedPtyControls::default()));
         let (wake, _wake_read_fd) = test_wake_pair();
@@ -1249,7 +1347,11 @@ mod tests {
         let runner = reader.join().expect("reader thread joins");
 
         assert_eq!(
-            runner.pending_writes,
+            runner
+                .pending_writes
+                .iter()
+                .map(|pending| pending.input.bytes.clone())
+                .collect::<VecDeque<_>>(),
             VecDeque::from([
                 Bytes::from_static(b"live-light"),
                 Bytes::from_static(b"query-light"),
@@ -1276,9 +1378,7 @@ mod tests {
         let (data_tx, mut data_rx) = mpsc::channel(1);
         let (control_tx, _control_rx) = std_mpsc::channel();
         data_tx
-            .try_send(PtyIoDataCommand::WriteUserInput(Bytes::from_static(
-                b"fill",
-            )))
+            .try_send(user_write(Bytes::from_static(b"fill")))
             .expect("fill data queue");
         let (wake, _wake_read_fd) = test_wake_pair();
         let handle = PtyIoActorHandle {
@@ -1292,7 +1392,7 @@ mod tests {
 
         let write = tokio::spawn(async move {
             handle
-                .write_user_input(Bytes::from_static(b"wait-for-capacity"))
+                .write_user_input(manual_input(Bytes::from_static(b"wait-for-capacity")))
                 .await
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1303,15 +1403,15 @@ mod tests {
 
         assert!(matches!(
             data_rx.recv().await,
-            Some(PtyIoDataCommand::WriteUserInput(_))
+            Some(PtyIoDataCommand::WriteUserInput { .. })
         ));
         write
             .await
             .expect("write task joins")
             .expect("write succeeds after capacity opens");
         match data_rx.recv().await {
-            Some(PtyIoDataCommand::WriteUserInput(bytes)) => {
-                assert_eq!(bytes, Bytes::from_static(b"wait-for-capacity"));
+            Some(PtyIoDataCommand::WriteUserInput { input, .. }) => {
+                assert_eq!(input.bytes, Bytes::from_static(b"wait-for-capacity"));
             }
             _ => panic!("expected queued user input"),
         }
@@ -1322,9 +1422,7 @@ mod tests {
         let (data_tx, mut data_rx) = mpsc::channel(1);
         let (control_tx, control_rx) = std_mpsc::channel();
         data_tx
-            .try_send(PtyIoDataCommand::WriteUserInput(Bytes::from_static(
-                b"fill",
-            )))
+            .try_send(user_write(Bytes::from_static(b"fill")))
             .expect("fill data queue");
         let (wake, _wake_read_fd) = test_wake_pair();
         let handle = PtyIoActorHandle {
@@ -1338,7 +1436,7 @@ mod tests {
         let write_handle = handle.clone();
         let write = tokio::spawn(async move {
             write_handle
-                .write_user_input(Bytes::from_static(b"after-handoff-start"))
+                .write_user_input(manual_input(Bytes::from_static(b"after-handoff-start")))
                 .await
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1359,7 +1457,7 @@ mod tests {
             .expect("handoff succeeds");
         assert!(matches!(
             data_rx.recv().await,
-            Some(PtyIoDataCommand::WriteUserInput(_))
+            Some(PtyIoDataCommand::WriteUserInput { .. })
         ));
 
         let err = write.await.expect("write task joins").expect_err(
@@ -1377,9 +1475,7 @@ mod tests {
         let (data_tx, _data_rx) = mpsc::channel(1);
         let (control_tx, control_rx) = std_mpsc::channel();
         data_tx
-            .try_send(PtyIoDataCommand::WriteUserInput(Bytes::from_static(
-                b"fill",
-            )))
+            .try_send(user_write(Bytes::from_static(b"fill")))
             .expect("fill data queue");
         let (wake, _wake_read_fd) = test_wake_pair();
         let handle = PtyIoActorHandle {
@@ -1419,9 +1515,7 @@ mod tests {
         let (data_tx, data_rx) = mpsc::channel(ACTOR_COMMAND_BUFFER);
         let (_control_tx, control_rx) = std_mpsc::channel();
         data_tx
-            .try_send(PtyIoDataCommand::WriteUserInput(Bytes::from_static(
-                b"queued-before-ack",
-            )))
+            .try_send(user_write(Bytes::from_static(b"queued-before-ack")))
             .expect("queued write");
         let mut runner = PtyIoActorRunner {
             pane_id: 1,
@@ -1454,7 +1548,7 @@ mod tests {
 
         handle.release_after_commit().expect("actor released");
         assert!(handle
-            .try_write_user_input(Bytes::from_static(b"blocked"))
+            .try_write_user_input(manual_input(Bytes::from_static(b"blocked")))
             .is_err());
 
         let _ = peer.write_all(b"ignored");

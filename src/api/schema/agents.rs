@@ -181,6 +181,101 @@ pub struct AgentPromptParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentEnqueueParams {
+    pub version: u32,
+    pub instance_id: String,
+    pub idempotency_key: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentQueueGetParams {
+    pub queue_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct AgentQueueListParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<AgentQueueState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentQueueCancelParams {
+    pub queue_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentQueueAckParams {
+    pub queue_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentQueueState {
+    Queued,
+    Blocked,
+    Attempting,
+    Submitted,
+    Ambiguous,
+    Acknowledged,
+    Canceled,
+    Orphaned,
+}
+
+impl AgentQueueState {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Blocked => "blocked",
+            Self::Attempting => "attempting",
+            Self::Submitted => "submitted",
+            Self::Ambiguous => "ambiguous",
+            Self::Acknowledged => "acknowledged",
+            Self::Canceled => "canceled",
+            Self::Orphaned => "orphaned",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "queued" => Some(Self::Queued),
+            "blocked" => Some(Self::Blocked),
+            "attempting" => Some(Self::Attempting),
+            "submitted" => Some(Self::Submitted),
+            "ambiguous" => Some(Self::Ambiguous),
+            "acknowledged" => Some(Self::Acknowledged),
+            "canceled" => Some(Self::Canceled),
+            "orphaned" => Some(Self::Orphaned),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn is_terminal(self) -> bool {
+        matches!(self, Self::Acknowledged | Self::Canceled | Self::Orphaned)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentQueueReceipt {
+    pub version: u32,
+    pub queue_id: String,
+    pub instance_id: String,
+    pub idempotency_key: String,
+    pub state: AgentQueueState,
+    pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pty_epoch: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentInfo {
     pub terminal_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

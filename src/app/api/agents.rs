@@ -3,8 +3,9 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::api::schema::{
-    AgentPromptParams, AgentRenameParams, AgentSendKeysParams, AgentStartParams, AgentTarget,
-    PaneReadResult, ResponseResult,
+    AgentEnqueueParams, AgentPromptParams, AgentQueueAckParams, AgentQueueCancelParams,
+    AgentQueueGetParams, AgentQueueListParams, AgentQueueReceipt, AgentRenameParams,
+    AgentSendKeysParams, AgentStartParams, AgentTarget, PaneReadResult, ResponseResult,
 };
 use crate::app::App;
 
@@ -13,6 +14,162 @@ use super::responses::{encode_error, encode_error_body, encode_success};
 const AGENT_PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
 
 impl App {
+    pub(super) fn handle_agent_enqueue(
+        &mut self,
+        id: String,
+        params: AgentEnqueueParams,
+    ) -> String {
+        if params.version != 1 {
+            return encode_error(id, "invalid_request", "agent enqueue version must be 1");
+        }
+        let Some(instance_id) = crate::agent_instance::AgentInstanceId::parse(&params.instance_id)
+        else {
+            return encode_error(id, "invalid_request", "instance_id must be a UUID");
+        };
+        let instance_id = instance_id.to_string();
+        if params.idempotency_key.is_empty()
+            || params.idempotency_key.len() > 512
+            || params.idempotency_key.chars().any(char::is_control)
+        {
+            return encode_error(
+                id,
+                "invalid_request",
+                "idempotency_key must contain 1-512 non-control characters",
+            );
+        }
+        if params.text.is_empty() || params.text.len() > 16 * 1024 || params.text.contains('\0') {
+            return encode_error(
+                id,
+                "invalid_request",
+                "queue text must contain 1-16384 bytes and no NUL",
+            );
+        }
+        if !self.state.terminals.values().any(|terminal| {
+            terminal
+                .agent_instance_id()
+                .is_some_and(|current| current.to_string() == instance_id)
+        }) {
+            return encode_error(
+                id,
+                "instance_mismatch",
+                format!("agent instance {instance_id} is not current"),
+            );
+        }
+
+        let outcome = match self.agent_queue.store_mut() {
+            Ok(store) => match store.enqueue(&instance_id, &params.idempotency_key, &params.text) {
+                Ok(outcome) => outcome,
+                Err(err) => return encode_queue_error(id, err),
+            },
+            Err(err) => return encode_queue_store_error(id, err),
+        };
+        if !outcome.duplicate {
+            self.emit_agent_queue_updated(outcome.receipt.clone());
+        }
+        encode_success(
+            id,
+            ResponseResult::AgentQueueReceipt {
+                queue: outcome.receipt,
+            },
+        )
+    }
+
+    pub(super) fn handle_agent_queue_get(
+        &mut self,
+        id: String,
+        params: AgentQueueGetParams,
+    ) -> String {
+        let result = match self.agent_queue.store_mut() {
+            Ok(store) => store.get(&params.queue_id),
+            Err(err) => return encode_queue_store_error(id, err),
+        };
+        match result {
+            Ok(queue) => encode_success(id, ResponseResult::AgentQueueReceipt { queue }),
+            Err(err) => encode_queue_error(id, err),
+        }
+    }
+
+    pub(super) fn handle_agent_queue_list(
+        &mut self,
+        id: String,
+        params: AgentQueueListParams,
+    ) -> String {
+        if params.instance_id.as_deref().is_some_and(|instance_id| {
+            crate::agent_instance::AgentInstanceId::parse(instance_id).is_none()
+        }) {
+            return encode_error(id, "invalid_request", "instance_id must be a UUID");
+        }
+        let result = match self.agent_queue.store_mut() {
+            Ok(store) => store.list(params.instance_id.as_deref(), params.state),
+            Err(err) => return encode_queue_store_error(id, err),
+        };
+        match result {
+            Ok(queues) => encode_success(id, ResponseResult::AgentQueueList { queues }),
+            Err(err) => encode_queue_error(id, err),
+        }
+    }
+
+    pub(super) fn handle_agent_queue_cancel(
+        &mut self,
+        id: String,
+        params: AgentQueueCancelParams,
+    ) -> String {
+        let previous = match self.agent_queue.store_mut() {
+            Ok(store) => match store.get(&params.queue_id) {
+                Ok(previous) => previous,
+                Err(err) => return encode_queue_error(id, err),
+            },
+            Err(err) => return encode_queue_store_error(id, err),
+        };
+        let result = match self.agent_queue.store_mut() {
+            Ok(store) => store.cancel(&params.queue_id),
+            Err(err) => return encode_queue_store_error(id, err),
+        };
+        match result {
+            Ok(queue) => {
+                if queue.state != previous.state {
+                    self.emit_agent_queue_updated(queue.clone());
+                }
+                encode_success(id, ResponseResult::AgentQueueReceipt { queue })
+            }
+            Err(err) => encode_queue_error(id, err),
+        }
+    }
+
+    pub(super) fn handle_agent_queue_ack(
+        &mut self,
+        id: String,
+        params: AgentQueueAckParams,
+    ) -> String {
+        let previous = match self.agent_queue.store_mut() {
+            Ok(store) => match store.get(&params.queue_id) {
+                Ok(previous) => previous,
+                Err(err) => return encode_queue_error(id, err),
+            },
+            Err(err) => return encode_queue_store_error(id, err),
+        };
+        let result = match self.agent_queue.store_mut() {
+            Ok(store) => store.acknowledge(&params.queue_id),
+            Err(err) => return encode_queue_store_error(id, err),
+        };
+        match result {
+            Ok(queue) => {
+                if queue.state != previous.state {
+                    self.emit_agent_queue_updated(queue.clone());
+                }
+                encode_success(id, ResponseResult::AgentQueueReceipt { queue })
+            }
+            Err(err) => encode_queue_error(id, err),
+        }
+    }
+
+    fn emit_agent_queue_updated(&mut self, queue: AgentQueueReceipt) {
+        self.emit_event(crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::AgentQueueUpdated,
+            data: crate::api::schema::EventData::AgentQueueUpdated { queue },
+        });
+    }
+
     pub(super) fn handle_agent_list(&mut self, id: String) -> String {
         encode_success(
             id,
@@ -285,6 +442,45 @@ impl App {
         }
 
         encode_success(id, ResponseResult::Ok {})
+    }
+}
+
+fn encode_queue_store_error(id: String, error: crate::queue::StoreError) -> String {
+    encode_error(id, error.kind.code(), error.message)
+}
+
+fn encode_queue_error(id: String, error: crate::queue::QueueError) -> String {
+    match error {
+        crate::queue::QueueError::Store(error) => encode_queue_store_error(id, error),
+        crate::queue::QueueError::NotFound => {
+            encode_error(id, "queue_not_found", "agent queue row not found")
+        }
+        crate::queue::QueueError::IdempotencyConflict(receipt) => encode_error(
+            id,
+            "idempotency_conflict",
+            format!(
+                "idempotency key already belongs to queue {} with different text",
+                receipt.queue_id
+            ),
+        ),
+        crate::queue::QueueError::AlreadySubmitted(receipt) => encode_error(
+            id,
+            "already_submitted",
+            format!(
+                "queue {} may already have reached the terminal in state {}",
+                receipt.queue_id,
+                receipt.state.as_str()
+            ),
+        ),
+        crate::queue::QueueError::InvalidTransition(receipt) => encode_error(
+            id,
+            "invalid_queue_state",
+            format!(
+                "queue {} cannot perform that operation from state {}",
+                receipt.queue_id,
+                receipt.state.as_str()
+            ),
+        ),
     }
 }
 

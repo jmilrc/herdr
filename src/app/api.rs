@@ -1075,6 +1075,19 @@ impl App {
             }
             Method::AgentStart(params) => return self.handle_agent_start(request.id, params),
             Method::AgentPrompt(params) => return self.handle_agent_prompt(request.id, params),
+            Method::AgentEnqueue(params) => return self.handle_agent_enqueue(request.id, params),
+            Method::AgentQueueGet(params) => {
+                return self.handle_agent_queue_get(request.id, params)
+            }
+            Method::AgentQueueList(params) => {
+                return self.handle_agent_queue_list(request.id, params)
+            }
+            Method::AgentQueueCancel(params) => {
+                return self.handle_agent_queue_cancel(request.id, params)
+            }
+            Method::AgentQueueAck(params) => {
+                return self.handle_agent_queue_ack(request.id, params)
+            }
             Method::AgentWait(_) => {
                 return responses::encode_error(
                     request.id,

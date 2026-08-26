@@ -1167,7 +1167,15 @@ impl PaneRuntimeIo {
 
     async fn send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::SendError<Bytes>> {
         match self {
-            PaneRuntimeIo::Actor(actor) => actor.write_user_input(bytes).await,
+            PaneRuntimeIo::Actor(actor) => {
+                actor
+                    .write_user_input(crate::pty::input::PtyInput::new(
+                        bytes,
+                        crate::pty::input::InputProvenance::Manual,
+                        crate::pty::input::InputKind::Content,
+                    ))
+                    .await
+            }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { sender, .. } => sender.send(bytes).await,
         }
@@ -1175,7 +1183,13 @@ impl PaneRuntimeIo {
 
     fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         match self {
-            PaneRuntimeIo::Actor(actor) => actor.try_write_user_input(bytes),
+            PaneRuntimeIo::Actor(actor) => {
+                actor.try_write_user_input(crate::pty::input::PtyInput::new(
+                    bytes,
+                    crate::pty::input::InputProvenance::Manual,
+                    crate::pty::input::InputKind::Content,
+                ))
+            }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { sender, .. } => sender.try_send(bytes),
         }
@@ -1199,7 +1213,14 @@ impl PaneRuntimeIo {
                 let actor = actor.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(delay).await;
-                    if let Err(err) = actor.write_user_input(bytes).await {
+                    if let Err(err) = actor
+                        .write_user_input(crate::pty::input::PtyInput::new(
+                            bytes,
+                            crate::pty::input::InputProvenance::Manual,
+                            crate::pty::input::InputKind::Content,
+                        ))
+                        .await
+                    {
                         warn!(error = %err, "failed to send delayed PTY input");
                     }
                 });

@@ -1,9 +1,11 @@
 use std::time::{Duration, Instant};
 
 use crate::api::schema::{
-    AgentPromptParams, AgentPromptWaitOptions, AgentReadParams, AgentRenameParams,
-    AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams, EmptyParams, ErrorBody,
-    ErrorResponse, Method, PaneProcessInfoParams, PaneTarget, ReadFormat, ReadSource, Request,
+    AgentEnqueueParams, AgentPromptParams, AgentPromptWaitOptions, AgentQueueAckParams,
+    AgentQueueCancelParams, AgentQueueGetParams, AgentQueueListParams, AgentQueueState,
+    AgentReadParams, AgentRenameParams, AgentSendKeysParams, AgentStartParams, AgentTarget,
+    AgentWaitParams, EmptyParams, ErrorBody, ErrorResponse, Method, PaneProcessInfoParams,
+    PaneTarget, ReadFormat, ReadSource, Request,
 };
 
 const AGENT_START_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -21,6 +23,8 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "read" => agent_read(&args[1..]),
         "send-keys" => agent_send_keys(&args[1..]),
         "prompt" => agent_prompt(&args[1..]),
+        "enqueue" => agent_enqueue(&args[1..]),
+        "queue" => agent_queue(&args[1..]),
         "rename" => agent_rename(&args[1..]),
         "focus" => agent_focus(&args[1..]),
         "wait" => agent_wait(&args[1..]),
@@ -36,6 +40,192 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
             Ok(2)
         }
     }
+}
+
+fn agent_enqueue(args: &[String]) -> std::io::Result<i32> {
+    let Some(instance_id) = args.first() else {
+        eprintln!("usage: herdr agent enqueue <instance-id> --idempotency-key KEY (--text TEXT|--text-file PATH|-)");
+        return Ok(2);
+    };
+    let mut idempotency_key = None;
+    let mut text = None;
+    let mut text_file = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--idempotency-key" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --idempotency-key");
+                    return Ok(2);
+                };
+                idempotency_key = Some(value.clone());
+                index += 2;
+            }
+            "--text" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --text");
+                    return Ok(2);
+                };
+                text = Some(value.clone());
+                index += 2;
+            }
+            "--text-file" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --text-file");
+                    return Ok(2);
+                };
+                text_file = Some(value.clone());
+                index += 2;
+            }
+            "help" | "--help" | "-h" => {
+                eprintln!("usage: herdr agent enqueue <instance-id> --idempotency-key KEY (--text TEXT|--text-file PATH|-)");
+                return Ok(0);
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+        }
+    }
+    let Some(idempotency_key) = idempotency_key else {
+        eprintln!("missing required --idempotency-key");
+        return Ok(2);
+    };
+    if text.is_some() == text_file.is_some() {
+        eprintln!("provide exactly one of --text or --text-file");
+        return Ok(2);
+    }
+    let text = match (text, text_file) {
+        (Some(text), None) => text,
+        (None, Some(path)) if path == "-" => {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+            text
+        }
+        (None, Some(path)) => std::fs::read_to_string(path)?,
+        _ => unreachable!(),
+    };
+    let response = super::send_request(&Request {
+        id: "cli:agent:enqueue".into(),
+        method: Method::AgentEnqueue(AgentEnqueueParams {
+            version: 1,
+            instance_id: instance_id.clone(),
+            idempotency_key,
+            text,
+        }),
+    })?;
+    super::print_response(&response)
+}
+
+fn agent_queue(args: &[String]) -> std::io::Result<i32> {
+    match args.first().map(String::as_str) {
+        Some("get") => agent_queue_get(&args[1..]),
+        Some("list") => agent_queue_list(&args[1..]),
+        Some("cancel") => agent_queue_cancel(&args[1..]),
+        Some("ack") => agent_queue_ack(&args[1..]),
+        Some("help" | "--help" | "-h") | None => {
+            print_agent_queue_help();
+            Ok(if args.is_empty() { 2 } else { 0 })
+        }
+        Some(other) => {
+            eprintln!("unknown agent queue command: {other}");
+            print_agent_queue_help();
+            Ok(2)
+        }
+    }
+}
+
+fn agent_queue_get(args: &[String]) -> std::io::Result<i32> {
+    let [queue_id] = args else {
+        eprintln!("usage: herdr agent queue get <queue-id>");
+        return Ok(2);
+    };
+    send_queue_request(
+        "get",
+        Method::AgentQueueGet(AgentQueueGetParams {
+            queue_id: queue_id.clone(),
+        }),
+    )
+}
+
+fn agent_queue_list(args: &[String]) -> std::io::Result<i32> {
+    let mut instance_id = None;
+    let mut state = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--instance" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --instance");
+                    return Ok(2);
+                };
+                instance_id = Some(value.clone());
+                index += 2;
+            }
+            "--state" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --state");
+                    return Ok(2);
+                };
+                let Some(parsed) = AgentQueueState::parse(value) else {
+                    eprintln!("invalid queue state: {value}");
+                    return Ok(2);
+                };
+                state = Some(parsed);
+                index += 2;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+        }
+    }
+    send_queue_request(
+        "list",
+        Method::AgentQueueList(AgentQueueListParams { instance_id, state }),
+    )
+}
+
+fn agent_queue_cancel(args: &[String]) -> std::io::Result<i32> {
+    let [queue_id] = args else {
+        eprintln!("usage: herdr agent queue cancel <queue-id>");
+        return Ok(2);
+    };
+    send_queue_request(
+        "cancel",
+        Method::AgentQueueCancel(AgentQueueCancelParams {
+            queue_id: queue_id.clone(),
+        }),
+    )
+}
+
+fn agent_queue_ack(args: &[String]) -> std::io::Result<i32> {
+    let [queue_id] = args else {
+        eprintln!("usage: herdr agent queue ack <queue-id>");
+        return Ok(2);
+    };
+    send_queue_request(
+        "ack",
+        Method::AgentQueueAck(AgentQueueAckParams {
+            queue_id: queue_id.clone(),
+        }),
+    )
+}
+
+fn send_queue_request(label: &str, method: Method) -> std::io::Result<i32> {
+    let response = super::send_request(&Request {
+        id: format!("cli:agent:queue:{label}"),
+        method,
+    })?;
+    super::print_response(&response)
+}
+
+fn print_agent_queue_help() {
+    eprintln!("herdr agent queue commands:");
+    eprintln!("  herdr agent queue get <queue-id>");
+    eprintln!("  herdr agent queue list [--instance UUID] [--state STATE]");
+    eprintln!("  herdr agent queue cancel <queue-id>");
+    eprintln!("  herdr agent queue ack <queue-id>");
 }
 
 fn agent_explain(args: &[String]) -> std::io::Result<i32> {
@@ -926,6 +1116,8 @@ fn print_agent_help() {
     eprintln!("  herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!("  herdr agent send-keys <target> <key> [key ...]");
     eprintln!("  herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]");
+    eprintln!("  herdr agent enqueue <instance-id> --idempotency-key KEY (--text TEXT|--text-file PATH|-)");
+    eprintln!("  herdr agent queue get|list|cancel|ack ...");
     eprintln!("  herdr agent rename <target> <name>|--clear");
     eprintln!("  herdr agent focus <target>");
     eprintln!("  herdr agent wait <target> [--until STATUS]... [--timeout MS]");

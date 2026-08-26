@@ -15,6 +15,8 @@ mod windows {
     use tokio::sync::mpsc;
     use tracing::{debug, warn};
 
+    use crate::pty::input::{InputKind, InputProvenance, PtyInput};
+
     pub(crate) struct PtyReadResult {
         pub terminal_responses: Vec<Bytes>,
     }
@@ -48,11 +50,16 @@ mod windows {
         Shutdown,
     }
 
+    struct PtyIoDataCommand {
+        input: PtyInput,
+        completion: Option<std_mpsc::Sender<std::io::Result<()>>>,
+    }
+
     #[derive(Clone)]
     pub(crate) struct PtyIoActorHandle {
-        data_tx: mpsc::Sender<Bytes>,
+        data_tx: mpsc::Sender<PtyIoDataCommand>,
         control_tx: std_mpsc::Sender<PtyIoControlCommand>,
-        write_tx: std_mpsc::Sender<Bytes>,
+        write_tx: std_mpsc::Sender<PtyIoDataCommand>,
         response_order: Arc<Mutex<()>>,
         accepting: Arc<Mutex<bool>>,
     }
@@ -60,30 +67,82 @@ mod windows {
     impl PtyIoActorHandle {
         pub(crate) async fn write_user_input(
             &self,
-            bytes: Bytes,
+            input: PtyInput,
         ) -> Result<(), mpsc::error::SendError<Bytes>> {
             if !*self
                 .accepting
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
             {
-                return Err(mpsc::error::SendError(bytes));
+                return Err(mpsc::error::SendError(input.bytes));
             }
-            self.data_tx.send(bytes).await
+            self.data_tx
+                .send(PtyIoDataCommand {
+                    input,
+                    completion: None,
+                })
+                .await
+                .map_err(|err| mpsc::error::SendError(err.0.input.bytes))
         }
 
         pub(crate) fn try_write_user_input(
             &self,
-            bytes: Bytes,
+            input: PtyInput,
         ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
             if !*self
                 .accepting
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
             {
-                return Err(mpsc::error::TrySendError::Closed(bytes));
+                return Err(mpsc::error::TrySendError::Closed(input.bytes));
             }
-            self.data_tx.try_send(bytes)
+            self.data_tx
+                .try_send(PtyIoDataCommand {
+                    input,
+                    completion: None,
+                })
+                .map_err(|err| match err {
+                    mpsc::error::TrySendError::Full(command) => {
+                        mpsc::error::TrySendError::Full(command.input.bytes)
+                    }
+                    mpsc::error::TrySendError::Closed(command) => {
+                        mpsc::error::TrySendError::Closed(command.input.bytes)
+                    }
+                })
+        }
+
+        pub(crate) fn write_user_input_transaction(&self, input: PtyInput) -> std::io::Result<()> {
+            if !*self
+                .accepting
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "PTY actor is not accepting input",
+                ));
+            }
+            let (completion_tx, completion_rx) = std_mpsc::channel();
+            self.data_tx
+                .try_send(PtyIoDataCommand {
+                    input,
+                    completion: Some(completion_tx),
+                })
+                .map_err(|err| match err {
+                    mpsc::error::TrySendError::Full(_) => std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "PTY actor input queue full",
+                    ),
+                    mpsc::error::TrySendError::Closed(_) => {
+                        std::io::Error::new(std::io::ErrorKind::BrokenPipe, "PTY actor closed")
+                    }
+                })?;
+            completion_rx.recv().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "PTY actor closed before input transaction completed",
+                )
+            })?
         }
 
         pub(crate) fn write_terminal_response(&self, response: impl FnOnce() -> Option<Bytes>) {
@@ -92,7 +151,10 @@ mod windows {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(bytes) = response().filter(|bytes| !bytes.is_empty()) {
-                let _ = self.write_tx.send(bytes);
+                let _ = self.write_tx.send(PtyIoDataCommand {
+                    input: PtyInput::new(bytes, InputProvenance::System, InputKind::Control),
+                    completion: None,
+                });
             }
         }
 
@@ -143,15 +205,25 @@ mod windows {
             let mut writer = master
                 .take_writer()
                 .map_err(|err| std::io::Error::other(err.to_string()))?;
-            let (data_tx, mut data_rx) = mpsc::channel::<Bytes>(1024);
+            let (data_tx, mut data_rx) = mpsc::channel::<PtyIoDataCommand>(1024);
             let (control_tx, control_rx) = std_mpsc::channel::<PtyIoControlCommand>();
-            let (write_tx, write_rx) = std_mpsc::channel::<Bytes>();
+            let (write_tx, write_rx) = std_mpsc::channel::<PtyIoDataCommand>();
             let response_order = Arc::new(Mutex::new(()));
             let accepting = Arc::new(Mutex::new(!initially_quiesced));
 
             std::thread::spawn(move || {
-                for bytes in write_rx {
-                    if writer.write_all(&bytes).is_err() || writer.flush().is_err() {
+                for command in write_rx {
+                    let result = writer
+                        .write_all(&command.input.bytes)
+                        .and_then(|()| writer.flush());
+                    if let Some(completion) = command.completion {
+                        let completion_result = result
+                            .as_ref()
+                            .map(|()| ())
+                            .map_err(|err| std::io::Error::new(err.kind(), err.to_string()));
+                        let _ = completion.send(completion_result);
+                    }
+                    if result.is_err() {
                         break;
                     }
                 }
@@ -161,8 +233,8 @@ mod windows {
             {
                 let write_tx = write_tx.clone();
                 std::thread::spawn(move || {
-                    while let Some(bytes) = data_rx.blocking_recv() {
-                        if write_tx.send(bytes).is_err() {
+                    while let Some(command) = data_rx.blocking_recv() {
+                        if write_tx.send(command).is_err() {
                             break;
                         }
                     }
@@ -183,11 +255,18 @@ mod windows {
                                     .lock()
                                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                                 let result = on_read(&buf[..n]);
-                                if result
-                                    .terminal_responses
-                                    .into_iter()
-                                    .any(|response| write_tx.send(response).is_err())
-                                {
+                                if result.terminal_responses.into_iter().any(|response| {
+                                    write_tx
+                                        .send(PtyIoDataCommand {
+                                            input: PtyInput::new(
+                                                response,
+                                                InputProvenance::System,
+                                                InputKind::Control,
+                                            ),
+                                            completion: None,
+                                        })
+                                        .is_err()
+                                }) {
                                     break;
                                 }
                             }
@@ -219,11 +298,18 @@ mod windows {
                                 }) {
                                     warn!(pane_id, err = %err, "windows pty resize failed");
                                 }
-                                if request
-                                    .terminal_responses
-                                    .into_iter()
-                                    .any(|response| write_tx.send(response).is_err())
-                                {
+                                if request.terminal_responses.into_iter().any(|response| {
+                                    write_tx
+                                        .send(PtyIoDataCommand {
+                                            input: PtyInput::new(
+                                                response,
+                                                InputProvenance::System,
+                                                InputKind::Control,
+                                            ),
+                                            completion: None,
+                                        })
+                                        .is_err()
+                                }) {
                                     break;
                                 }
                             }

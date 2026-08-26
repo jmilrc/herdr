@@ -39,6 +39,80 @@
     },
     "event": {
       "$defs": {
+        "AgentQueueReceipt": {
+          "properties": {
+            "attempts": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "block_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "idempotency_key": {
+              "type": "string"
+            },
+            "instance_id": {
+              "type": "string"
+            },
+            "last_error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pty_epoch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "queue_id": {
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/schemas/event/$defs/AgentQueueState"
+            },
+            "updated_at": {
+              "type": "string"
+            },
+            "version": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "version",
+            "queue_id",
+            "instance_id",
+            "idempotency_key",
+            "state",
+            "attempts",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        },
+        "AgentQueueState": {
+          "enum": [
+            "queued",
+            "blocked",
+            "attempting",
+            "submitted",
+            "ambiguous",
+            "acknowledged",
+            "canceled",
+            "orphaned"
+          ],
+          "type": "string"
+        },
         "AgentSessionInfo": {
           "properties": {
             "agent": {
@@ -722,6 +796,22 @@
             },
             {
               "properties": {
+                "queue": {
+                  "$ref": "#/schemas/event/$defs/AgentQueueReceipt"
+                },
+                "type": {
+                  "const": "agent_queue_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "queue"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "layout": {
                   "$ref": "#/schemas/event/$defs/PaneLayoutSnapshot"
                 },
@@ -765,6 +855,7 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
+            "agent_queue_updated",
             "layout_updated"
           ],
           "type": "string"
@@ -1240,6 +1331,31 @@
     },
     "request": {
       "$defs": {
+        "AgentEnqueueParams": {
+          "properties": {
+            "idempotency_key": {
+              "type": "string"
+            },
+            "instance_id": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "version": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "version",
+            "instance_id",
+            "idempotency_key",
+            "text"
+          ],
+          "type": "object"
+        },
         "AgentPromptParams": {
           "properties": {
             "target": {
@@ -1283,6 +1399,73 @@
             }
           },
           "type": "object"
+        },
+        "AgentQueueAckParams": {
+          "properties": {
+            "queue_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "queue_id"
+          ],
+          "type": "object"
+        },
+        "AgentQueueCancelParams": {
+          "properties": {
+            "queue_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "queue_id"
+          ],
+          "type": "object"
+        },
+        "AgentQueueGetParams": {
+          "properties": {
+            "queue_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "queue_id"
+          ],
+          "type": "object"
+        },
+        "AgentQueueListParams": {
+          "properties": {
+            "instance_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/AgentQueueState"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "AgentQueueState": {
+          "enum": [
+            "queued",
+            "blocked",
+            "attempting",
+            "submitted",
+            "ambiguous",
+            "acknowledged",
+            "canceled",
+            "orphaned"
+          ],
+          "type": "string"
         },
         "AgentReadParams": {
           "properties": {
@@ -3977,6 +4160,18 @@
             },
             {
               "properties": {
+                "type": {
+                  "const": "agent.queue.updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "lines": {
                   "format": "uint32",
                   "minimum": 0,
@@ -5107,6 +5302,86 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/AgentPromptParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.enqueue",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentEnqueueParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.queue.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentQueueGetParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.queue.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentQueueListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.queue.cancel",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentQueueCancelParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.queue.ack",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentQueueAckParams"
             }
           },
           "required": [
@@ -6341,6 +6616,80 @@
           ],
           "type": "object"
         },
+        "AgentQueueReceipt": {
+          "properties": {
+            "attempts": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "block_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "idempotency_key": {
+              "type": "string"
+            },
+            "instance_id": {
+              "type": "string"
+            },
+            "last_error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pty_epoch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "queue_id": {
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/schemas/success_response/$defs/AgentQueueState"
+            },
+            "updated_at": {
+              "type": "string"
+            },
+            "version": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "version",
+            "queue_id",
+            "instance_id",
+            "idempotency_key",
+            "state",
+            "attempts",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        },
+        "AgentQueueState": {
+          "enum": [
+            "queued",
+            "blocked",
+            "attempting",
+            "submitted",
+            "ambiguous",
+            "acknowledged",
+            "canceled",
+            "orphaned"
+          ],
+          "type": "string"
+        },
         "AgentSessionInfo": {
           "properties": {
             "agent": {
@@ -7040,6 +7389,22 @@
             },
             {
               "properties": {
+                "queue": {
+                  "$ref": "#/schemas/success_response/$defs/AgentQueueReceipt"
+                },
+                "type": {
+                  "const": "agent_queue_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "queue"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "layout": {
                   "$ref": "#/schemas/success_response/$defs/PaneLayoutSnapshot"
                 },
@@ -7098,6 +7463,7 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
+            "agent_queue_updated",
             "layout_updated"
           ],
           "type": "string"
@@ -9007,6 +9373,41 @@
               "required": [
                 "type",
                 "agent"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "queue": {
+                  "$ref": "#/schemas/success_response/$defs/AgentQueueReceipt"
+                },
+                "type": {
+                  "const": "agent_queue_receipt",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "queue"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "queues": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/AgentQueueReceipt"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "agent_queue_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "queues"
               ],
               "type": "object"
             },

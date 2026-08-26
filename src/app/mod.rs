@@ -108,6 +108,7 @@ pub struct App {
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
     pub(crate) event_hub: crate::api::EventHub,
+    pub(crate) agent_queue: crate::queue::QueueRuntime,
     pub(crate) last_focus: Option<(usize, crate::layout::PaneId)>,
     pub(crate) no_session: bool,
     pub(crate) input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
@@ -807,6 +808,13 @@ impl App {
             input_leases: input::InputLeaseTable::default(),
             api_rx,
             event_hub,
+            agent_queue: if no_session {
+                crate::queue::QueueRuntime::in_memory()
+            } else {
+                crate::queue::QueueRuntime::open(
+                    &crate::session::data_dir().join("agent-queue.sqlite3"),
+                )
+            },
             last_focus,
             no_session,
             input_rx: None,
@@ -851,6 +859,9 @@ impl App {
         let pane_id_aliases = crate::persist::handoff_pane_aliases(snapshot, &workspaces);
 
         app.no_session = false;
+        app.agent_queue = crate::queue::QueueRuntime::open(
+            &crate::session::data_dir().join("agent-queue.sqlite3"),
+        );
         app.state.installed_plugins = load_plugin_registry(app.no_session);
         let now = Instant::now();
         if background_update_check_enabled(app.no_session, app.update_version_check_enabled) {

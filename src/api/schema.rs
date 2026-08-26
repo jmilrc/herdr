@@ -125,6 +125,16 @@ pub enum Method {
     AgentStart(AgentStartParams),
     #[serde(rename = "agent.prompt")]
     AgentPrompt(AgentPromptParams),
+    #[serde(rename = "agent.enqueue")]
+    AgentEnqueue(AgentEnqueueParams),
+    #[serde(rename = "agent.queue.get")]
+    AgentQueueGet(AgentQueueGetParams),
+    #[serde(rename = "agent.queue.list")]
+    AgentQueueList(AgentQueueListParams),
+    #[serde(rename = "agent.queue.cancel")]
+    AgentQueueCancel(AgentQueueCancelParams),
+    #[serde(rename = "agent.queue.ack")]
+    AgentQueueAck(AgentQueueAckParams),
     #[serde(rename = "agent.wait")]
     AgentWait(AgentWaitParams),
     #[serde(rename = "pane.split")]

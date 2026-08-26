@@ -151,6 +151,90 @@ fn agent_start_and_prompt_requests_round_trip() {
 }
 
 #[test]
+fn agent_queue_enqueue_and_ack_wire_fixture() {
+    let enqueue = Request {
+        id: "enqueue-1".into(),
+        method: Method::AgentEnqueue(AgentEnqueueParams {
+            version: 1,
+            instance_id: "018f45d3-4e90-7d6a-b684-55e125dd5555".into(),
+            idempotency_key: "buzz:decision:42".into(),
+            text: "Choose option B".into(),
+        }),
+    };
+    let enqueue_json = serde_json::json!({
+        "id": "enqueue-1",
+        "method": "agent.enqueue",
+        "params": {
+            "version": 1,
+            "instance_id": "018f45d3-4e90-7d6a-b684-55e125dd5555",
+            "idempotency_key": "buzz:decision:42",
+            "text": "Choose option B"
+        }
+    });
+    assert_eq!(serde_json::to_value(&enqueue).unwrap(), enqueue_json);
+    assert_eq!(
+        serde_json::from_value::<Request>(enqueue_json).unwrap(),
+        enqueue
+    );
+
+    let ack = Request {
+        id: "ack-1".into(),
+        method: Method::AgentQueueAck(AgentQueueAckParams {
+            queue_id: "0192c353-9d31-7ca4-9bad-6249cd77a001".into(),
+        }),
+    };
+    let ack_json = serde_json::json!({
+        "id": "ack-1",
+        "method": "agent.queue.ack",
+        "params": {
+            "queue_id": "0192c353-9d31-7ca4-9bad-6249cd77a001"
+        }
+    });
+    assert_eq!(serde_json::to_value(&ack).unwrap(), ack_json);
+    assert_eq!(serde_json::from_value::<Request>(ack_json).unwrap(), ack);
+
+    let response = SuccessResponse {
+        id: "enqueue-1".into(),
+        result: ResponseResult::AgentQueueReceipt {
+            queue: AgentQueueReceipt {
+                version: 1,
+                queue_id: "0192c353-9d31-7ca4-9bad-6249cd77a001".into(),
+                instance_id: "018f45d3-4e90-7d6a-b684-55e125dd5555".into(),
+                idempotency_key: "buzz:decision:42".into(),
+                state: AgentQueueState::Queued,
+                attempts: 0,
+                block_reason: None,
+                last_error: None,
+                pty_epoch: None,
+                created_at: "2026-08-26T20:30:00.000Z".into(),
+                updated_at: "2026-08-26T20:30:00.000Z".into(),
+            },
+        },
+    };
+    let response_json = serde_json::json!({
+        "id": "enqueue-1",
+        "result": {
+            "type": "agent_queue_receipt",
+            "queue": {
+                "version": 1,
+                "queue_id": "0192c353-9d31-7ca4-9bad-6249cd77a001",
+                "instance_id": "018f45d3-4e90-7d6a-b684-55e125dd5555",
+                "idempotency_key": "buzz:decision:42",
+                "state": "queued",
+                "attempts": 0,
+                "created_at": "2026-08-26T20:30:00.000Z",
+                "updated_at": "2026-08-26T20:30:00.000Z"
+            }
+        }
+    });
+    assert_eq!(serde_json::to_value(&response).unwrap(), response_json);
+    assert_eq!(
+        serde_json::from_value::<SuccessResponse>(response_json).unwrap(),
+        response
+    );
+}
+
+#[test]
 fn bundled_protocol_schema_refs_resolve_inside_bundle() {
     fn assert_no_standalone_refs(value: &serde_json::Value) {
         match value {

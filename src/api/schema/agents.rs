@@ -269,8 +269,6 @@ pub struct AgentQueueReceipt {
     pub block_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pty_epoch: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

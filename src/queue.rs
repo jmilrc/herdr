@@ -478,7 +478,9 @@ impl QueueStore {
         let next: Option<(String, String)> = transaction
             .query_row(
                 "SELECT queue_id, text FROM agent_queue
-                 WHERE instance_id=?1 AND state IN ('queued','blocked','ambiguous')
+                 WHERE instance_id=?1 AND (
+                    state IN ('queued','blocked') OR (state='ambiguous' AND attempts < 2)
+                 )
                  ORDER BY enqueue_seq LIMIT 1",
                 [instance_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
@@ -630,6 +632,7 @@ impl QueueStore {
         Ok(orphaned)
     }
 
+    #[cfg(test)]
     pub(crate) fn event_count(&self) -> Result<u64, StoreError> {
         self.connection
             .query_row("SELECT COUNT(*) FROM agent_queue_events", [], |row| {
@@ -694,7 +697,6 @@ fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentQueueRecei
         attempts: u32::try_from(attempts).unwrap_or(u32::MAX),
         block_reason: row.get(5)?,
         last_error: row.get(6)?,
-        pty_epoch: row.get(7)?,
         created_at: format_timestamp(row.get(8)?),
         updated_at: format_timestamp(row.get(9)?),
     })

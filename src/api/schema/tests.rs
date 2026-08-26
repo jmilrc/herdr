@@ -205,7 +205,6 @@ fn agent_queue_enqueue_and_ack_wire_fixture() {
                 attempts: 0,
                 block_reason: None,
                 last_error: None,
-                pty_epoch: None,
                 created_at: "2026-08-26T20:30:00.000Z".into(),
                 updated_at: "2026-08-26T20:30:00.000Z".into(),
             },

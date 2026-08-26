@@ -67,12 +67,6 @@
                 "null"
               ]
             },
-            "pty_epoch": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
             "queue_id": {
               "type": "string"
             },
@@ -6639,12 +6633,6 @@
               "type": "string"
             },
             "last_error": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "pty_epoch": {
               "type": [
                 "string",
                 "null"

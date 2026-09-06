@@ -1,3 +1,4 @@
+# Self-hosted only; unserved until runners are deliberately assigned.
 name: CI
 
 on:
@@ -21,7 +22,7 @@ concurrency:
 jobs:
   conventional-commits:
     if: github.event_name != 'push' || github.ref_name == 'master'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 5
     steps:
       - name: Checkout
@@ -47,14 +48,17 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+            runner: [self-hosted, Linux, X64]
             kind: unix
             nextest_filter: all()
           - os: macos-latest
+            runner: [self-hosted, macOS, ARM64]
             kind: unix
             nextest_filter: not binary(live_handoff)
           - os: windows-latest
+            runner: [self-hosted, Windows, X64]
             kind: windows
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -152,7 +156,7 @@ jobs:
 
   windows-conpty-package:
     name: Windows ConPTY package
-    runs-on: windows-2022
+    runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 25
     steps:
       - name: Checkout

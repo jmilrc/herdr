@@ -1,3 +1,4 @@
+# Self-hosted only; unserved until runners are deliberately assigned.
 name: Preview
 
 on:
@@ -21,7 +22,7 @@ concurrency:
 
 jobs:
   preflight:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: read
     outputs:
@@ -127,20 +128,25 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
+            runner: [self-hosted, Linux, X64]
             name: herdr-linux-x86_64
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
+            runner: [self-hosted, Linux, X64]
             name: herdr-linux-aarch64
           - target: x86_64-apple-darwin
             os: macos-latest
+            runner: [self-hosted, macOS, ARM64]
             name: herdr-macos-x86_64
           - target: aarch64-apple-darwin
             os: macos-latest
+            runner: [self-hosted, macOS, ARM64]
             name: herdr-macos-aarch64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+            runner: [self-hosted, Windows, X64]
             name: herdr-windows-x86_64.zip
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     env:
       LIBGHOSTTY_VT_OPTIMIZE: ReleaseFast
       LIBGHOSTTY_VT_SIMD: 'true'
@@ -285,7 +291,7 @@ jobs:
   publish:
     needs: [preflight, build]
     if: needs.preflight.outputs.should_publish == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     concurrency:
       group: docs-publish-master
       cancel-in-progress: false

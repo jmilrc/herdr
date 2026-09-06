@@ -1,3 +1,4 @@
+# Self-hosted only; unserved until runners are deliberately assigned.
 name: Build artifacts (manual)
 
 on:
@@ -43,16 +44,18 @@ env:
 jobs:
   build-linux:
     if: ${{ inputs.build_group == 'linux' || inputs.build_group == 'all' }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
+            runner: [self-hosted, Linux, X64]
             name: herdr-linux-x86_64
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
+            runner: [self-hosted, Linux, X64]
             name: herdr-linux-aarch64
     env:
       LIBGHOSTTY_VT_OPTIMIZE: ${{ inputs.libghostty_optimize }}
@@ -127,16 +130,18 @@ jobs:
 
   build-macos:
     if: ${{ inputs.build_group == 'macos' || inputs.build_group == 'all' }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-apple-darwin
             os: macos-latest
+            runner: [self-hosted, macOS, ARM64]
             name: herdr-macos-x86_64
           - target: aarch64-apple-darwin
             os: macos-latest
+            runner: [self-hosted, macOS, ARM64]
             name: herdr-macos-aarch64
     env:
       LIBGHOSTTY_VT_OPTIMIZE: ${{ inputs.libghostty_optimize }}
@@ -190,7 +195,7 @@ jobs:
 
   build-windows:
     if: ${{ inputs.build_group == 'windows' || inputs.build_group == 'all' }}
-    runs-on: windows-latest
+    runs-on: [self-hosted, Windows, X64]
     env:
       LIBGHOSTTY_VT_OPTIMIZE: ${{ inputs.libghostty_optimize }}
       LIBGHOSTTY_VT_SIMD: ${{ inputs.libghostty_simd }}

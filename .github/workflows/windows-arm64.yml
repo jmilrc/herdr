@@ -1,3 +1,4 @@
+# Self-hosted only; unserved until runners are deliberately assigned.
 name: Windows ARM64 installer
 
 on:
@@ -24,7 +25,7 @@ concurrency:
 jobs:
   installer:
     name: installer
-    runs-on: windows-11-arm
+    runs-on: [self-hosted, Windows, ARM64]
     timeout-minutes: 10
     steps:
       - name: Checkout

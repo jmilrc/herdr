@@ -1,3 +1,4 @@
+# Self-hosted only; unserved until runners are deliberately assigned.
 name: PR Gate
 
 on:
@@ -11,7 +12,7 @@ concurrency:
 jobs:
   check-contributor:
     if: github.repository == 'herdrdev/herdr'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: read
       issues: write

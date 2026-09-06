@@ -1,3 +1,4 @@
+# Self-hosted only; unserved until runners are deliberately assigned.
 name: Release
 
 on:
@@ -14,7 +15,7 @@ env:
 
 jobs:
   flake-check:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: read
 
@@ -43,31 +44,36 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
+            runner: [self-hosted, Linux, X64]
             name: herdr-linux-x86_64
             libghostty_vt_optimize: ReleaseFast
             libghostty_vt_simd: 'true'
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
+            runner: [self-hosted, Linux, X64]
             name: herdr-linux-aarch64
             libghostty_vt_optimize: ReleaseFast
             libghostty_vt_simd: 'true'
           - target: x86_64-apple-darwin
             os: macos-latest
+            runner: [self-hosted, macOS, ARM64]
             name: herdr-macos-x86_64
             libghostty_vt_optimize: ReleaseFast
             libghostty_vt_simd: 'true'
           - target: aarch64-apple-darwin
             os: macos-latest
+            runner: [self-hosted, macOS, ARM64]
             name: herdr-macos-aarch64
             libghostty_vt_optimize: ReleaseFast
             libghostty_vt_simd: 'true'
           - target: x86_64-pc-windows-msvc
             os: windows-2022
+            runner: [self-hosted, Windows, X64]
             name: herdr-windows-x86_64.zip
             libghostty_vt_optimize: ReleaseFast
             libghostty_vt_simd: 'true'
 
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     env:
       LIBGHOSTTY_VT_OPTIMIZE: ${{ matrix.libghostty_vt_optimize }}
       LIBGHOSTTY_VT_SIMD: ${{ matrix.libghostty_vt_simd }}
@@ -181,7 +187,7 @@ jobs:
           path: ${{ matrix.name }}
 
   validate-release-inputs:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: read
 
@@ -204,7 +210,7 @@ jobs:
 
   release:
     needs: [build, flake-check, validate-release-inputs]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: write
 
@@ -232,7 +238,7 @@ jobs:
 
   close-released-issues:
     needs: release
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     continue-on-error: true
     permissions:
       contents: read
@@ -368,7 +374,7 @@ jobs:
 
   update-latest-json:
     needs: release
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     concurrency:
       group: docs-publish-master
       cancel-in-progress: false
